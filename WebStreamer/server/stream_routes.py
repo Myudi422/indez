@@ -80,52 +80,58 @@ def parse_range_header(range_header, file_size):
         raise web.HTTPBadRequest(text="Invalid Range Header")
 
 async def media_streamer(request: web.Request, message_id: int):
-    range_header = request.headers.get("Range", 0)
-    faster_client = await select_client()
+    try:
+        range_header = request.headers.get("Range", 0)
+        faster_client = await select_client()
 
-    if faster_client in class_cache:
-        tg_connect = class_cache[faster_client]
-        logging.debug(f"Using cached ByteStreamer object for client {faster_client}")
-    else:
-        logging.debug(f"Creating new ByteStreamer object for client {faster_client}")
-        tg_connect = utils.ByteStreamer(faster_client)
-        add_to_cache(faster_client, tg_connect)
+        if faster_client in class_cache:
+            tg_connect = class_cache[faster_client]
+            logging.debug(f"Using cached ByteStreamer object for client {faster_client}")
+        else:
+            logging.debug(f"Creating new ByteStreamer object for client {faster_client}")
+            tg_connect = utils.ByteStreamer(faster_client)
+            add_to_cache(faster_client, tg_connect)
 
-    file_id = await tg_connect.get_file_properties(message_id)
-    file_size = file_id.file_size
+        file_id = await tg_connect.get_file_properties(message_id)
+        file_size = file_id.file_size
 
-    if range_header:
-        from_bytes, until_bytes = parse_range_header(range_header, file_size)
-    else:
-        from_bytes = 0
-        until_bytes = file_size - 1
+        if range_header:
+            from_bytes, until_bytes = parse_range_header(range_header, file_size)
+        else:
+            from_bytes = 0
+            until_bytes = file_size - 1
 
-    if (until_bytes > file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
-        return web.Response(
-            status=416,
-            body="416: Range not satisfiable",
-            headers={"Content-Range": f"bytes */{file_size}"},
+        if (until_bytes > file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
+            return web.Response(
+                status=416,
+                body="416: Range not satisfiable",
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
+
+        chunk_size = 1024 * 1024
+        until_bytes = min(until_bytes, file_size - 1)
+
+        req_length = until_bytes - from_bytes + 1
+        body = tg_connect.yield_file(
+            file_id, from_bytes, until_bytes, chunk_size
+        )
+        mime_type = file_id.mime_type or "application/octet-stream"
+        file_name = file_id.file_name or f"{secrets.token_hex(2)}.unknown"
+        disposition = (
+            "inline" if "video/" in mime_type or "audio/" in mime_type or "/html" in mime_type else "attachment"
         )
 
-    chunk_size = 1024 * 1024
-    until_bytes = min(until_bytes, file_size - 1)
-
-    req_length = until_bytes - from_bytes + 1
-    body = tg_connect.yield_file(
-        file_id, from_bytes, until_bytes, chunk_size
-    )
-    mime_type = file_id.mime_type
-    file_name = file_id.file_name or f"{secrets.token_hex(2)}.unknown"
-    disposition = "inline" if "video/" in mime_type or "audio/" in mime_type or "/html" in mime_type else "attachment"
-
-    return web.Response(
-        status=206 if range_header else 200,
-        body=body,
-        headers={
-            "Content-Type": f"{mime_type}",
-            "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-            "Content-Length": str(req_length),
-            "Content-Disposition": f'{disposition}; filename="{file_name}"',
-            "Accept-Ranges": "bytes",
-        },
-    )
+        return web.Response(
+            status=206 if range_header else 200,
+            body=body,
+            headers={
+                "Content-Type": f"{mime_type}",
+                "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+                "Content-Length": str(req_length),
+                "Content-Disposition": f'{disposition}; filename="{file_name}"',
+                "Accept-Ranges": "bytes",
+            },
+        )
+    except Exception as e:
+        logging.error(f"Error in media_streamer: {e}")
+        return web.HTTPInternalServerError(text="An error occurred")  # Pastikan selalu ada respon
